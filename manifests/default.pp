@@ -1,21 +1,9 @@
-exec {'disabled-selinux':
-	command => "sed -i 's/enforcing/disabled/' /etc/sysconfig/selinux",
-	logoutput => true,
-	path => '/bin/'
-}
-
-exec {'accept-http-port':
-	command => 'iptables -A INPUT -m state --state NEW -m tcp -p tcp --dport 80 -j ACCEPT',
-	logoutput => true,
-	path => ['/sbin/','/bin/'],
-	unless => "iptables --list INPUT -n | egrep '80'",
-} ->
-
-exec {'save-iptables':
-	command => 'iptables-save',
-	logoutput => true,
-	path => '/sbin/',
-} ->
+$username = 'vagrant'
+$ruby = '2.0.0-p594'
+$redmine = '2.5.3'
+$rubypath = "/home/${username}/.rbenv/versions/${ruby}/bin/"
+$gemrubypath = "/home/${username}/.gem/ruby/2.0.0/bin/"
+$appendpath = "/home/${username}/.rbenv/shmis:$gemrubypath:$rubypath"
 
 package {"epel-release":
 	provider=>rpm,
@@ -39,55 +27,20 @@ package {'libyaml-devel': ensure => installed} ->
 package {'mysql-server': ensure => installed} ->
 package {'mysql-devel': ensure => installed} ->
 
+package {'httpd': ensure => installed} ->
+package {'httpd-devel': ensure => installed} ->
+
 package {'ImageMagick': ensure => installed} ->
 package {'ImageMagick-devel': ensure => installed} ->
 package {'ipa-pgothic-fonts': ensure => installed} ->
 
-exec {'download-ruby':
-	command => 'curl -O http://cache.ruby-lang.org/pub/ruby/2.0/ruby-2.0.0-p594.tar.bz2',
-	cwd => '/opt/',
-	timeout => 0,
-	path => '/usr/bin/',
-	unless => 'test -e /opt/ruby-2.0.0-p594.tar.bz2',
-} ->
+package {'expect': ensure => installed} ->
 
-exec {'extract-ruby-tar-gz':
-	command => 'tar zxvf ruby-2.0.0-p594.tar.bz2',
-	cwd => '/opt/',
-	path => ['/usr/bin','/bin/'],
-	unless => 'test -d /opt/ruby-2.0.0-p594/',
-} ->
-
-exec {'configure-ruby-tar-gz':
-	command => '/bin/sh -c ./configure --disable-install-doc',
-	cwd => '/opt/ruby-2.0.0-p594/',
-} ->
-
-exec {'make-ruby':
-	command => 'make',
-	cwd => '/opt/ruby-2.0.0-p594/',
-	timeout => 0,
-	path => ['/bin/','/usr/bin/'],
-	unless => 'which ruby',
-} ->
-
-exec {'install-ruby':
-	command => 'make install',
-	cwd => '/opt/ruby-2.0.0-p594/',
-	path => ['/bin/', '/usr/bin/'],
-	unless => 'which ruby',
-} ->
-
-#exec {'install-gem-source':
-#	command => 'gem source --add https://rubygems.org',
-#	path => '/usr/bin',
-#	timeout => 0,
-#} ->
-
-exec {'install-bundler':
-	command => 'gem install bundler --no-rdoc --no-ri',
-	path => '/usr/bin/',
-	timeout => 0,
+rbenv::install {"${username}":} ->
+rbenv::compile {"${username}":
+	user => "${username}",
+	ruby => "${ruby}",
+	global => true,
 } ->
 
 exec {'insert-char-set-server-for-mysql':
@@ -112,8 +65,63 @@ service {'mysqld':
 } ->
 
 exec { "mysql-autosecure":
-	command => "sh /vagrant/files/mysql-autosecure.sh changeme",
+	command => 'bash -c "/vagrant/files/mysql-autosecure.sh changeme"',
 	path => "/usr/bin:/bin/",
 	creates => "/usr/bin/mysql_sequre_installation.ran",
 	logoutput => true,
+	provider => 'shell',
+} ->
+
+exec { "mysql-redmine":
+	command => 'bash -c "/vagrant/files/mysql-redmine.sh changeme"',
+	path => "/usr/bin:/bin/",
+	logoutput => true,
+	provider => 'shell',
+} ->
+
+archive { "redmine-${redmine}":
+	ensure => present,
+	url => "http://www.redmine.org/releases/redmine-${redmine}.tar.gz",
+	target => "/opt",
+} ->
+
+exec {'move-redmine-dir':
+	command => "mv redmine-${redmine} /var/lib/redmine",
+	cwd => '/opt/',
+	path => ['/usr/bin','/bin/'],
+	unless => 'test -d /var/lib/redmine/',
+} ->
+
+file {'/var/lib/redmine/config/database.yml':
+	source => '/vagrant/files/database.yml',
+} ->
+
+file {'/var/lib/redmine/config/configuration.yml':
+	source => '/vagrant/files/configuration.yml',
+} ->
+
+exec {'install-gem-packages':
+	command => "bundle install --without development test",
+	logoutput => true,
+	cwd => '/var/lib/redmine/',
+	path => "/usr/bin:/bin/:${appendpath}",
+	timeout => 0,
+} ->
+
+exec {'init-redmine':
+	command => 'bundle exec rake generate_secret_token',
+	logoutput => true,
+	cwd => '/var/lib/redmine/',
+	path => "${appendpath}:/usr/bin:/bin/",
+	timeout => 0,
+} ->
+
+exec {'create-redmine-database-table':
+	command => 'bundle exec rake db:migrate',
+	logoutput => true,
+	cwd => '/var/lib/redmine/',
+	environment => 'RAILS_ENV=production',
+	path => "${appendpath}:/usr/bin:/bin/",
+	timeout => 0,
 }
+
